@@ -2,7 +2,7 @@
 # Called by every pkg-* repo on pull requests.
 #
 # Validates the `### Requires` section of the PR body:
-#   - the section must exist (use "- none" when there are no dependencies)
+#   - a missing or empty section, or "- none", means no dependencies
 #   - every entry must look like "- pkg-name@1.2.3"       -> error if not
 #   - the named repo must exist in the org                  -> error if not
 #   - the version should exist there as a release, draft
@@ -47,11 +47,7 @@ jobs:
             | sed -n '/^### Requires/,/^#/{/^#/!p;}' \
             | sed '/^[[:space:]]*$/d')
 
-          if [ -z "$section" ]; then
-            echo "::error::PR body has no '### Requires' section. Add it, with '- none' if this PR needs nothing."
-            exit 1
-          fi
-          if [ "$section" = "- none" ]; then
+          if [ -z "$section" ] || [ "$(tr '[:upper:]' '[:lower:]' <<<"$section")" = "- none" ]; then
             echo "No cross-package requirements declared."
             exit 0
           fi
