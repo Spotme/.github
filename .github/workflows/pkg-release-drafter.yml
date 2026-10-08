@@ -13,10 +13,14 @@
 #   2. If the PR carries the label `release:new`, the current draft release is
 #      frozen: its tag is pointed at the commit before this merge and it is
 #      turned into a published pre-release. Pre-release == "waiting for the train".
-#   3. release-drafter creates or updates the draft release for main.
+#   3. release-drafter creates or updates the draft release for the default branch.
 #   4. If the draft no longer contains any PR (everything reverted), the draft
 #      is deleted. Otherwise the `### Requires` blocks of all PRs in the draft
 #      are collected and written into the draft body under `## Requires`.
+#
+# release-drafter reads pkg-release-drafter.yml from the package repo's .github/
+# folder and, when it is not there, from this repo. That fallback works with the
+# default workflow token only because Spotme/.github is public.
 
 name: Package release drafter
 

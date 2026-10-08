@@ -8,10 +8,12 @@
 #   - the version should exist there as a release, draft
 #     or pre-release                                        -> warning if not
 #
-# The cross-repo lookups need a token that can read other pkg-* repos.
-# Pass it as the secret ORG_READ_TOKEN (fine-grained PAT or GitHub App token
-# with "Contents: read" and "Metadata: read" on pkg-* repos). Without it the
-# cross-repo checks are skipped with a warning.
+# The cross-repo lookups need a token that can read other (private) pkg-*
+# repos. Pass it as the optional org secret ORG_READ_TOKEN (fine-grained PAT or
+# GitHub App token on pkg-* repos with "Metadata: read" and "Contents: read and
+# write"; write because the releases API hides drafts from read-only tokens).
+# Without it the format is still checked and the version lookup is skipped
+# with a warning.
 
 name: Package requires check
 
