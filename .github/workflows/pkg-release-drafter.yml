@@ -1,0 +1,186 @@
+# Reusable workflow. Lives in Spotme/.github.
+# Called by every pkg-* repo on closed pull requests. Only PRs merged into the
+# repo's default branch (dev, main, ...) count; the draft targets that branch.
+# PRs into patch/* or master branches are ignored.
+#
+# What it does on every merge:
+#   0. If the PR has no version label, one is derived from its conventional
+#      commit title: `feat!:`/`fix!:` -> major, `feat:` -> minor, anything
+#      else stays unlabelled (= patch).
+#   1. If the merged PR is a revert (title starts with `Revert "`), both the
+#      revert PR and the original PR get the label `skip-changelog`, so
+#      release-drafter drops them from the draft.
+#   2. If the PR carries the label `release:new`, the current draft release is
+#      frozen: its tag is pointed at the commit before this merge and it is
+#      turned into a published pre-release. Pre-release == "waiting for the train".
+#   3. release-drafter creates or updates the draft release for main.
+#   4. If the draft no longer contains any PR (everything reverted), the draft
+#      is deleted. Otherwise the `### Requires` blocks of all PRs in the draft
+#      are collected and written into the draft body under `## Requires`.
+
+name: Package release drafter
+
+on:
+  workflow_call:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  draft:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      startsWith(github.event.repository.name, 'pkg-')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Derive version label from conventional commit title
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          case ",$LABELS," in
+            *,major,*|*,breaking,*|*,minor,*|*,feature,*|*,enhancement,*|*,patch,*|*,fix,*|*,bug,*|*,chore,*|*,dependencies,*)
+              echo "PR already has a version label: $LABELS"; exit 0 ;;
+          esac
+          if [[ "$PR_TITLE" =~ ^[a-z]+(\([^\)]*\))?!: ]]; then
+            label=major
+          elif [[ "$PR_TITLE" =~ ^feat(\([^\)]*\))?: ]]; then
+            label=minor
+          else
+            echo "No version label, defaults to patch."; exit 0
+          fi
+          gh api -X POST "repos/$GH_REPO/issues/$PR/labels" -f "labels[]=$label" > /dev/null \
+            && echo "Labelled #$PR $label from its title." \
+            || echo "::warning::Could not label PR #$PR $label. Does the label exist?"
+
+      - name: Exclude reverted PR pairs from the draft
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          case "$PR_TITLE" in
+            'Revert "'*) ;;
+            *) echo "Not a revert PR."; exit 0 ;;
+          esac
+          # GitHub's Revert button writes "Reverts Spotme/pkg-x#12" into the body.
+          original=$(grep -oE 'Reverts [^ ]*#[0-9]+' <<<"$PR_BODY" | grep -oE '[0-9]+$' | head -n1 || true)
+          if [ -n "$original" ]; then
+            gh api -X POST "repos/$GH_REPO/issues/$original/labels" -f 'labels[]=skip-changelog' > /dev/null \
+              && echo "Labelled original PR #$original skip-changelog" \
+              || echo "::warning::Could not label PR #$original. Does the skip-changelog label exist?"
+          else
+            echo "::warning::Revert PR has no 'Reverts #NNN' reference. Label the original PR skip-changelog by hand."
+          fi
+          gh api -X POST "repos/$GH_REPO/issues/$PR/labels" -f 'labels[]=skip-changelog' > /dev/null \
+            || echo "::warning::Could not label PR #$PR. Does the skip-changelog label exist?"
+
+      - name: Freeze current draft (PR labelled release:new)
+        if: contains(github.event.pull_request.labels.*.name, 'release:new')
+        env:
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          draft_id=$(gh api "repos/$GH_REPO/releases?per_page=100" \
+                       --jq '[.[] | select(.draft)] | first | .id // empty')
+          if [ -z "$draft_id" ]; then
+            echo "No draft release to freeze, nothing to do."
+            exit 0
+          fi
+          parent=$(gh api "repos/$GH_REPO/commits/$MERGE_SHA" --jq '.parents[0].sha')
+          tag=$(gh api "repos/$GH_REPO/releases/$draft_id" --jq .tag_name)
+          gh api -X PATCH "repos/$GH_REPO/releases/$draft_id" \
+            -f target_commitish="$parent" \
+            -F draft=false \
+            -F prerelease=true > /dev/null
+          echo "Froze $tag at $parent as a pre-release. A new draft starts with this PR."
+
+      - name: Report the version baseline
+        run: |
+          set -euo pipefail
+          # Mirror release-drafter: highest version among published releases, any tag spelling.
+          gh api "repos/$GH_REPO/releases?per_page=100" \
+            --jq '.[] | select(.draft | not) | .tag_name' > tags.txt
+          if [ ! -s tags.txt ]; then
+            echo "::warning::No published release found. The first draft will be v0.1.0; create a release by hand if the package already has a version."
+            exit 0
+          fi
+          best=""; bestnorm="0.0.0"
+          while read -r tag; do
+            norm=$(grep -oE '[0-9]+(\.[0-9]+){0,2}' <<<"$tag" | head -n1 || true)
+            [ -z "$norm" ] && continue
+            case "$norm" in
+              *.*.*) ;;
+              *.*) norm="$norm.0" ;;
+              *) norm="$norm.0.0" ;;
+            esac
+            if [ "$(printf '%s\n%s\n' "$bestnorm" "$norm" | sort -V | tail -n1)" = "$norm" ] && [ "$norm" != "$bestnorm" ]; then
+              best="$tag"; bestnorm="$norm"
+            fi
+          done < tags.txt
+          echo "Baseline: $best (read as $bestnorm)"
+          if ! [[ "$best" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::warning::Newest tag '$best' is not in the form v1.2.3. It is read as $bestnorm; the next draft will be tagged in the correct form."
+          fi
+
+      - name: Create or update draft release
+        id: drafter
+        uses: release-drafter/release-drafter@v6
+        with:
+          config-name: pkg-release-drafter.yml
+          # On pull_request events GITHUB_REF is refs/pull/N/merge; point the
+          # draft and the commit history at the default branch instead.
+          commitish: ${{ github.event.repository.default_branch }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Delete empty draft or rebuild "Requires" section
+        env:
+          RELEASE_ID: ${{ steps.drafter.outputs.id }}
+        run: |
+          set -euo pipefail
+          body=$(gh api "repos/$GH_REPO/releases/$RELEASE_ID" --jq .body)
+
+          # Drop any previous Requires section; it is regenerated every run.
+          base=$(printf '%s\n' "$body" | sed '/^## Requires$/,$d')
+
+          # Every "#123" in the draft body is a PR number placed there by release-drafter.
+          prs=$(grep -oE '#[0-9]+' <<<"$base" | tr -d '#' | sort -un || true)
+
+          if [ -z "$prs" ]; then
+            gh api -X DELETE "repos/$GH_REPO/releases/$RELEASE_ID"
+            echo "Draft contained no PRs (all reverted or excluded). Draft deleted."
+            exit 0
+          fi
+
+          while read -r n; do
+            # Drop CRs and HTML comments: the template's example line lives in a comment.
+            gh pr view "$n" --json body --jq .body 2>/dev/null \
+              | tr -d '\r' | perl -0pe 's/<!--.*?-->//gs' \
+              | sed -n '/^### Requires/,/^#/{/^#/!p;}' \
+              | grep -E '^- pkg-[a-z0-9-]+@[0-9]+\.[0-9]+\.[0-9]+$' || true
+          done <<<"$prs" \
+            | sed 's/^- //' \
+            | sort -t@ -k1,1 -k2,2V \
+            | awk -F@ '{ last[$1] = $0 } END { for (k in last) print last[k] }' \
+            | sort > requires.txt
+
+          if [ -s requires.txt ]; then
+            { printf '%s\n\n## Requires\n' "$base"; sed 's/^/- /' requires.txt; } > body.md
+            echo "Requires:"; cat requires.txt
+          else
+            printf '%s\n' "$base" > body.md
+            echo "No cross-package requirements in this draft."
+          fi
+
+          gh api -X PATCH "repos/$GH_REPO/releases/$RELEASE_ID" -F body=@body.md > /dev/null

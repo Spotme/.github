@@ -1,0 +1,84 @@
+# Reusable workflow. Lives in Spotme/.github.
+# Called by every pkg-* repo on pull requests.
+#
+# Validates the `### Requires` section of the PR body:
+#   - the section must exist (use "- none" when there are no dependencies)
+#   - every entry must look like "- pkg-name@1.2.3"       -> error if not
+#   - the named repo must exist in the org                  -> error if not
+#   - the version should exist there as a release, draft
+#     or pre-release                                        -> warning if not
+#
+# The cross-repo lookups need a token that can read other pkg-* repos.
+# Pass it as the secret ORG_READ_TOKEN (fine-grained PAT or GitHub App token
+# with "Contents: read" and "Metadata: read" on pkg-* repos). Without it the
+# cross-repo checks are skipped with a warning.
+
+name: Package requires check
+
+on:
+  workflow_call:
+    secrets:
+      ORG_READ_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    if: startsWith(github.event.repository.name, 'pkg-')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      ORG: ${{ github.repository_owner }}
+      ORG_READ_TOKEN: ${{ secrets.ORG_READ_TOKEN }}
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Validate "### Requires" section
+        run: |
+          set -uo pipefail
+          # Drop CRs and HTML comments: the template's example line lives in a comment.
+          body=$(gh pr view "$PR" --json body --jq .body | tr -d '\r' | perl -0pe 's/<!--.*?-->//gs')
+          section=$(printf '%s\n' "$body" \
+            | sed -n '/^### Requires/,/^#/{/^#/!p;}' \
+            | sed '/^[[:space:]]*$/d')
+
+          if [ -z "$section" ]; then
+            echo "::error::PR body has no '### Requires' section. Add it, with '- none' if this PR needs nothing."
+            exit 1
+          fi
+          if [ "$section" = "- none" ]; then
+            echo "No cross-package requirements declared."
+            exit 0
+          fi
+
+          re='^- (pkg-[a-z0-9-]+)@([0-9]+\.[0-9]+\.[0-9]+)$'
+          status=0
+          while IFS= read -r line; do
+            if ! [[ "$line" =~ $re ]]; then
+              echo "::error::Bad Requires line: '$line'. Expected '- pkg-name@1.2.3' or '- none'."
+              status=1
+              continue
+            fi
+            pkg="${BASH_REMATCH[1]}"; ver="${BASH_REMATCH[2]}"
+
+            if [ -z "$ORG_READ_TOKEN" ]; then
+              echo "::warning::ORG_READ_TOKEN not set, cannot verify $pkg@$ver exists."
+              continue
+            fi
+
+            if ! GH_TOKEN="$ORG_READ_TOKEN" gh api "repos/$ORG/$pkg" --silent 2>/dev/null; then
+              echo "::error::Requires refers to unknown repo $ORG/$pkg."
+              status=1
+              continue
+            fi
+            if ! GH_TOKEN="$ORG_READ_TOKEN" gh api "repos/$ORG/$pkg/releases?per_page=100" \
+                   --jq '.[].tag_name' | grep -qx "v$ver"; then
+              echo "::warning::$pkg has no release, draft or pre-release v$ver yet. Merge that side first, or double-check the version."
+            else
+              echo "ok: $pkg@$ver"
+            fi
+          done <<<"$section"
+          exit $status

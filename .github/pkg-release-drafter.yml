@@ -1,0 +1,44 @@
+# release-drafter configuration shared by all pkg-* repos.
+# Lives in Spotme/.github/.github/pkg-release-drafter.yml and is picked up as
+# the org-wide fallback. A package repo can override it by adding a file with
+# the same name to its own .github/ folder.
+
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+# No tag-prefix on purpose: release-drafter then accepts the historical
+# variants (v1.2.3, v.1.2.3, 1.2.3, v1.2.3v, v1.0) when looking for the
+# highest existing version. New tags are always written as v1.2.3.
+
+# Frozen drafts become pre-releases. Treat them as the baseline so the next
+# draft only lists PRs merged after the freeze.
+include-pre-releases: true
+
+categories:
+  - title: 'Breaking changes'
+    labels: ['major', 'breaking']
+  - title: 'Features'
+    labels: ['minor', 'feature', 'enhancement']
+  - title: 'Bug fixes'
+    labels: ['patch', 'fix', 'bug']
+  - title: 'Maintenance'
+    labels: ['chore', 'dependencies']
+
+# "#$NUMBER" is required: the drafter workflow reads PR numbers back from the body.
+change-template: '- $TITLE (#$NUMBER) @$AUTHOR'
+change-title-escapes: '\<*_&'
+
+exclude-labels: ['skip-changelog']
+
+version-resolver:
+  major:
+    labels: ['major', 'breaking']
+  minor:
+    labels: ['minor', 'feature', 'enhancement']
+  patch:
+    labels: ['patch', 'fix', 'bug', 'chore', 'dependencies']
+  default: patch
+
+template: |
+  ## Changes
+  $CHANGES
