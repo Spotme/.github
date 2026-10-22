@@ -51,33 +51,33 @@ jobs:
           private-key: ${{ secrets.MERGE_UP_APP_PRIVATE_KEY }}
           permission-members: read
 
-      - name: Add the author's squad label
+      # Two steps because github-script exposes a single client per step: the
+      # lookup needs the App token, the labeling uses GITHUB_TOKEN.
+      - name: Look up the author's squad
+        id: squad
         uses: actions/github-script@v8
         env:
-          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          HAS_APP_TOKEN: ${{ steps.app-token.outputs.token != '' }}
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ steps.app-token.outputs.token || github.token }}
+          result-encoding: string
           script: |
             const author = context.payload.pull_request.user.login;
 
-            if (!process.env.APP_TOKEN) {
+            if (process.env.HAS_APP_TOKEN !== 'true') {
               core.warning('No merge-up-bot App token, cannot look up the author\'s squad.');
-              return;
+              return '';
             }
-
-            const teamOctokit = github.getOctokit(process.env.APP_TOKEN);
-            let squad = null;
 
             for (const team of process.env.SQUAD_TEAMS.split(' ')) {
               try {
-                const membership = await teamOctokit.rest.teams.getMembershipForUserInOrg({
+                const membership = await github.rest.teams.getMembershipForUserInOrg({
                   org: context.repo.owner,
                   team_slug: team,
                   username: author,
                 });
                 if (membership.data.state === 'active') {
-                  squad = team;
-                  break;
+                  return team;
                 }
               } catch (error) {
                 if (error.status !== 404) {
@@ -86,19 +86,25 @@ jobs:
               }
             }
 
-            if (!squad) {
-              core.notice(`${author} is in none of: ${process.env.SQUAD_TEAMS}. No squad label added.`);
-              return;
-            }
+            core.notice(`${author} is in none of: ${process.env.SQUAD_TEAMS}. No squad label added.`);
+            return '';
 
+      - name: Add the squad label
+        if: steps.squad.outputs.result != ''
+        uses: actions/github-script@v8
+        env:
+          SQUAD: ${{ steps.squad.outputs.result }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
             try {
               await github.rest.issues.addLabels({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: context.payload.pull_request.number,
-                labels: [squad],
+                labels: [process.env.SQUAD],
               });
-              core.info(`Added label ${squad} for ${author}.`);
+              core.info(`Added label ${process.env.SQUAD}.`);
             } catch (error) {
-              core.warning(`Could not add label ${squad}: ${error.message}`);
+              core.warning(`Could not add label ${process.env.SQUAD}: ${error.message}`);
             }
