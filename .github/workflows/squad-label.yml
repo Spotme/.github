@@ -1,0 +1,104 @@
+# Reusable workflow. Lives in Spotme/.github.
+# Called by the main repos (backend, backstage-app, spotme-webapp, 360-app) on
+# pull requests.
+#
+# Labels the PR with its author's squad: the first team in SQUAD_TEAMS the
+# author is an active member of gives the label of the same name. Authors in no
+# squad and bots (dependabot, merge-up-bot) get no label.
+#
+# Never fails the run: a missing token, a failed lookup or a missing label only
+# logs a warning, so a labeling problem never shows as a red check on the PR.
+#
+# A squad label missing from the calling repo is created on first use (default
+# color); create it by hand beforehand to pick its color.
+#
+# Setup required outside this file:
+#   - Team membership isn't visible to GITHUB_TOKEN, so the lookup uses the
+#     merge-up-bot GitHub App token (MERGE_UP_APP_ID / MERGE_UP_APP_PRIVATE_KEY,
+#     passed by the caller's `secrets: inherit`), with "Members: Read" org
+#     permission. The App must be installed on the calling repo.
+
+name: Squad label
+
+on:
+  workflow_call:
+    secrets:
+      MERGE_UP_APP_ID:
+        required: false
+      MERGE_UP_APP_PRIVATE_KEY:
+        required: false
+
+permissions:
+  pull-requests: write
+
+env:
+  SQUAD_TEAMS: 'squad-1 squad-2 squad-3'
+
+jobs:
+  label:
+    if: github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      # See setup above. Allowed to fail: the next step warns instead.
+      - name: Generate app token
+        id: app-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.MERGE_UP_APP_ID }}
+          private-key: ${{ secrets.MERGE_UP_APP_PRIVATE_KEY }}
+          permission-members: read
+
+      - name: Add the author's squad label
+        uses: actions/github-script@v8
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const author = context.payload.pull_request.user.login;
+
+            if (!process.env.APP_TOKEN) {
+              core.warning('No merge-up-bot App token, cannot look up the author\'s squad.');
+              return;
+            }
+
+            const teamOctokit = github.getOctokit(process.env.APP_TOKEN);
+            let squad = null;
+
+            for (const team of process.env.SQUAD_TEAMS.split(' ')) {
+              try {
+                const membership = await teamOctokit.rest.teams.getMembershipForUserInOrg({
+                  org: context.repo.owner,
+                  team_slug: team,
+                  username: author,
+                });
+                if (membership.data.state === 'active') {
+                  squad = team;
+                  break;
+                }
+              } catch (error) {
+                if (error.status !== 404) {
+                  core.warning(`Could not check ${author}'s membership of ${team}: ${error.message}`);
+                }
+              }
+            }
+
+            if (!squad) {
+              core.notice(`${author} is in none of: ${process.env.SQUAD_TEAMS}. No squad label added.`);
+              return;
+            }
+
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.pull_request.number,
+                labels: [squad],
+              });
+              core.info(`Added label ${squad} for ${author}.`);
+            } catch (error) {
+              core.warning(`Could not add label ${squad}: ${error.message}`);
+            }
