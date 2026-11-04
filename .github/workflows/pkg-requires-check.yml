@@ -43,9 +43,10 @@ jobs:
           set -uo pipefail
           # Drop CRs and HTML comments: the template's example line lives in a comment.
           body=$(gh pr view "$PR" --json body --jq .body | tr -d '\r' | perl -0pe 's/<!--.*?-->//gs')
+          # Blank lines and reference-link definitions (e.g. "[EP-1]: url" appended by the Jira app) aren't entries.
           section=$(printf '%s\n' "$body" \
             | sed -n '/^### Requires/,/^#/{/^#/!p;}' \
-            | sed '/^[[:space:]]*$/d')
+            | sed -e '/^[[:space:]]*$/d' -e '/^\[[^]]*\]:/d')
 
           if [ -z "$section" ] || [ "$(tr '[:upper:]' '[:lower:]' <<<"$section")" = "- none" ]; then
             echo "No cross-package requirements declared."
